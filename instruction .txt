@@ -1,0 +1,162 @@
+# 🧠 Project: Modular Experiment Framework (Game + Stat + AI)
+
+This project is a modular, batch-driven framework designed to run experiments combining a Snake game environment, a statistical preprocessing model (e.g., Bayesian), and an AI model (Genetic Algorithm). It supports full parameter tracking, batch versioning, and easy extension to new models.
+
+---
+
+## 🔍 Subcontractor Implementation Requirements
+
+To support implementation, this section answers all requested questions with detail:
+
+### 1. 🐍 Game Module – Detailed Logic
+
+* `game/state.py`: Defines the grid, the snake’s body (list of coordinates), and the food location.
+
+  * Grid: 2D array of size `grid_size x grid_size`
+  * Snake: A list of tuples (x, y), head is `snake[0]`
+  * Food: A tuple (x, y)
+
+* `game/actions.py`: 4 discrete actions: `UP`, `DOWN`, `LEFT`, `RIGHT`, each changes snake head position by 1.
+
+* `game/environment.py`:
+
+  * Game loop runs until collision with wall/self.
+  * Applies action, updates state, checks for food, collision.
+  * Increments score for food eaten, ends game on collision.
+
+* `game/visualizer.py`:
+
+  * Optionally uses `matplotlib` or `pygame` to draw the grid, snake body, and food per frame.
+
+### 2. 🤖 Genetic Algorithm Module – Detailed Logic
+
+* `genetic/agent.py`:
+
+  * Genome: Fixed-length vector of weights.
+  * Decision = `argmax(W × features)` → maps input features to one of 4 directions.
+
+* `genetic/population.py`:
+
+  * Initializes `population_size` agents randomly.
+  * Handles selection (e.g., top-k or tournament), crossover, and mutation.
+
+* `genetic/fitness.py`:
+
+  * Reward = weighted combination of: food eaten, survival time, movement efficiency.
+  * Reads processed stat features as input.
+
+* `genetic/trainer.py`:
+
+  * For each generation:
+
+    1. Load stat features → input layer to each agent
+    2. Evaluate all agents → assign fitness
+    3. Select top agents
+    4. Apply crossover and mutation
+    5. Create new population
+    6. Save scores.json, update summary.yaml
+
+### 3. 📊 Statistics Module – Detailed Logic
+
+* `statistics/interface.py`:
+
+  * Loads `raw_data.json` → dispatches to selected model by name (`bayesian`, etc.)
+
+* `statistics/bayesian.py`:
+
+  * Input: List of 50 trials, each with game length, score, collisions, food events
+  * Output:
+
+    * Mean score, survival rate, and entropy estimate
+    * Confidence intervals (if specified)
+    * Output stored as `stat_output.json`
+
+* `statistics/normalization.py`:
+
+  * Optional: Normalize score, time, movement frequency to range \[0, 1] for input into neural/genetic layer
+
+### 4. 🧪 Experiment Execution – Logic
+
+* `experiments/executor.py`:
+
+  * Reads config YAML
+  * Computes `param_key` from parameters (lr, bs, mom...)
+  * Creates folder: `results/{experiment}/{param_key}/run_XXX/`
+  * Calls `runner.py`
+
+* `experiments/runner.py`:
+
+  * Runs `batch_size` (e.g., 50) games → collects `raw_data.json`
+  * Passes it to stat model → generates `stat_output.json`
+  * Passes stat output to genetic agent → trains agent
+  * Saves: scores.json, summary.yaml, optional visual plot
+
+* `experiments/model_selector.py`:
+
+  * Based on `ai_model`, `stat_model` from config, returns appropriate Python class instances.
+
+### 5. 🧱 Data Structures
+
+* `game/state.py`:
+
+  ```python
+  state = {
+      'grid_size': 10,
+      'snake': [(5,5), (5,4), (5,3)],
+      'food': (7,7),
+      'direction': 'RIGHT'
+  }
+  ```
+
+* `raw_data.json`:
+
+  ```json
+  [
+    {"score": 8, "steps": 110, "food": 3, "collisions": false},
+    {"score": 3, "steps": 60, "food": 1, "collisions": true}
+  ]
+  ```
+
+* `stat_output.json`:
+
+  ```json
+  {
+    "mean_score": 5.4,
+    "entropy": 1.23,
+    "survival_rate": 0.82
+  }
+  ```
+
+* `scores.json`:
+
+  ```json
+  [12.4, 10.1, 13.5, 8.0, 7.6]
+  ```
+
+---
+
+## ✅ Summary of Implementation Guidance
+
+| Component  | Needs                               | File(s)                                        | Sample Provided |
+| ---------- | ----------------------------------- | ---------------------------------------------- | --------------- |
+| Game       | Rules, movement, collision, scoring | state.py, environment.py, actions.py           | ✅               |
+| Genetic AI | Genome, fitness, GA logic           | agent.py, fitness.py, population.py            | ✅               |
+| Stats      | Feature logic from raw data         | bayesian.py, interface.py                      | ✅               |
+| Experiment | Parameter-driven pipeline           | executor.py, runner.py, model\_selector.py     | ✅               |
+| Data       | Input/output formats                | raw\_data.json, stat\_output.json, scores.json | ✅               |
+
+All of the above describes how the system works internally and how the components interact.
+
+---
+
+## 🏁 To Begin
+
+The subcontractor can now implement each module according to this blueprint, starting from:
+
+1. `game/environment.py`
+2. `experiments/executor.py`
+3. `statistics/interface.py`
+4. `genetic/agent.py`
+   ...following the phases described in the writing plan.
+
+For any module, pseudocode and implementation logic are now clear and structured.

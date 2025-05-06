@@ -1,0 +1,31 @@
+# Example YAML Config Update
+experiment_name: snake_nn_evolution
+ai_model: genetic
+stat_model: bayesian
+batch_size: 500
+grid_size: 10
+
+# GA hyperparameters
+population_size: 100
+num_generations: 500
+mutation_rate: 0.01
+crossover_rate: 0.9
+elite_count: 5
+selection_method: tournament
+tournament_size: 5
+topk_k: 10
+
+# NN config
+hidden_size: 16  # <--- NEW parameter for the Neural Network hidden layer size
+
+# Fitness weights (may be less relevant for MSE fitness)
+score_weight: 1.0
+survival_weight: 5.0
+steps_weight: 0.02
+entropy_score_weight: 0.5
+entropy_food_weight: 0.0
+
+# Other settings
+render: False
+game_speed: 10
+resume_training: False

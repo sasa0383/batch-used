@@ -1,0 +1,56 @@
+# project-root/experiments/configs/exp_gridsearch.yaml
+
+# 📚 Example Config File for Grid Search
+# This file structure is illustrative and requires implementation
+# in the ExperimentExecutor or a dedicated grid search runner.
+
+experiment_name: "genetic_bayes_grid_search"
+
+# Base configuration - parameters that are NOT being swept
+base_config:
+  # Models
+  ai_model: "genetic"
+  stat_model: "bayesian"
+
+  # Game + batch
+  batch_size: 50
+  grid_size: 10
+  render: False
+  game_speed: 10
+
+  # Stat model config (Bayesian) - Can be fixed or part of search
+  bayesian:
+    prior: uniform
+    confidence_interval: 95
+    use_entropy: True
+
+  # Fitness function weights - Can be fixed or part of search
+  score_weight: 1.0
+  survival_weight: 5.0
+  steps_weight: 0.02
+  entropy_score_weight: 0.5
+  entropy_food_weight: 0.0
+
+
+# Grid Search Parameters
+# Specify parameters here with a list of values to iterate over.
+# Each combination of these lists will create one experiment run.
+grid_search_params:
+
+  # AI hyperparameters (Genetic Algorithm) to sweep
+  population_size: [50, 100, 200]
+  num_generations: [10, 20, 30]
+  mutation_rate: [0.005, 0.01, 0.02]
+  crossover_rate: [0.8, 0.9, 1.0]
+  selection_method: ["tournament", "topk"] # Example of sweeping method itself
+
+  # Example: Sweeping a stat model parameter
+  # bayesian.confidence_interval: [90, 95, 99] # How to represent nested params for search? Requires design.
+  # Or maybe flatten parameter names for search:
+  # bayesian_confidence_interval: [90, 95, 99]
+
+
+# Optional: Parameters that are fixed for the search but could be changed manually
+# fixed_params:
+#    render: False
+#    game_speed: 10
