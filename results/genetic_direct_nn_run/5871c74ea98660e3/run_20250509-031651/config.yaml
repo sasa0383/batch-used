@@ -1,0 +1,31 @@
+ai_model: genetic
+experiment_name: genetic_direct_nn_run
+fitness:
+    score_weight: 1.0
+    steps_weight: 0.01
+ga:
+    crossover_rate: 0.9
+    elite_count: 5
+    mutation_rate: 0.03
+    num_generations: 5000
+    population_size: 100
+    resume_training: false
+    selection_method: tournament
+    tournament_size: 5
+game_evaluation:
+    game_speed: 10
+    games_per_agent: 5
+    grid_size: 10
+    max_steps_per_game: 500
+    render_training: true
+neural_network:
+    hidden_size1: 32
+    hidden_size2: 16
+    normalize_features: true
+    output_size: 4
+    use_he_initialization: true
+    use_leaky_relu: true
+stagnation:
+    stagnation_generations: 20
+    stagnation_mutation_boost: 0.1
+    stagnation_threshold: 0.001

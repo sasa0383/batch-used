@@ -5,9 +5,10 @@ import json
 import time
 import yaml
 import numpy as np
+import hashlib # Import hashlib for generating a hash
 # Import necessary components
-from game.environment import SnakeEnvironment
-from statistics.interface import StatisticalModelInterface
+from game.environment import SnakeEnvironment # Now used by trainer
+# from statistics.interface import StatisticalModelInterface # Not used for training data anymore
 from genetic.trainer import GeneticTrainer
 # from experiments.model_selector import ModelSelector # ModelSelector used by executor
 
@@ -15,9 +16,9 @@ from genetic.trainer import GeneticTrainer
 class ExperimentRunner:
     """
     Orchestrates a single experiment run.
-    Handles running game batches, statistical processing, and AI training.
-    Supports resuming training from a previous genome and managing historical data.
-    Now trains a Genetic Algorithm with a Neural Network agent.
+    Handles setting up the AI training (Genetic Trainer) which now evaluates agents
+    by playing games directly.
+    Supports resuming training from a previous genome.
     """
 
     def __init__(self, config: dict, param_results_dir: str):
@@ -26,74 +27,22 @@ class ExperimentRunner:
 
         Args:
             config: The configuration dictionary for the experiment run.
-                    Includes game, stat, and ai model configurations, including NN hidden_size.
+                    Includes game, ai model configurations, NN architecture sizes,
+                    NN/feature flags, and stagnation parameters.
             param_results_dir: The directory for this specific parameter set (results/{experiment}/{param_key}/).
                                Used to find previous runs for resuming.
         """
         self.config = config
         self.param_results_dir = param_results_dir
 
-        self.batch_size = int(self.config.get('batch_size', 50))
+        # Get game configuration to pass to the trainer
         self.grid_size = int(self.config.get('grid_size', 10))
+        self.render_game = self.config.get('render', False)
+        self.game_speed = int(self.config.get('game_speed', 10))
+        self.games_per_agent = int(self.config.get('games_per_agent', 5)) # Get games_per_agent
 
         self.resume_training = self.config.get('resume_training', False)
         self.initial_genome_data = None # Will store loaded genome if resuming
-
-        # Define the path for historical data storage (central location)
-        self.historical_data_dir = os.path.join("results", "historical") # Central historical storage
-        self.historical_raw_data_path = os.path.join(self.historical_data_dir, "raw_data.json")
-        self.historical_processed_stats_path = os.path.join(self.historical_data_dir, "processed_stats.json") # As per redesign plan
-        self.historical_inputs_targets_path = os.path.join(self.historical_data_dir, "inputs_targets.json") # As per redesign plan
-        self.historical_stat_summary_path = os.path.join(self.historical_data_dir, "summary_historical_stat.yaml") # For historical stats summary
-
-
-        # Extract configs for sub-components
-        self.stat_model_name = self.config.get('stat_model', 'bayesian')
-        self.ai_model_name = self.config.get('ai_model', 'genetic')
-
-        # Ensure the stat model and AI model exist in the configuration
-        if self.stat_model_name not in self.config and self.stat_model_name != 'bayesian':
-             print(f"Warning: Specific config for stat model '{self.stat_model_name}' not found in config. Using default.")
-        if self.ai_model_name not in self.config and self.ai_model_name != 'genetic':
-             print(f"Warning: Specific config for AI model '{self.ai_model_name}' not found in config. Using default.")
-
-
-        stat_model_specific_config = self.config.get(self.stat_model_name, {})
-        ai_model_specific_config = self.config.get(self.ai_model_name, {})
-
-        # Pass flat GA/Fitness/Population configs to the specific AI model config
-        ai_model_specific_config['population_size'] = self.config.get('population_size', 100)
-        ai_model_specific_config['num_generations'] = int(self.config.get('num_generations', 10))
-        ai_model_specific_config['mutation_rate'] = self.config.get('mutation_rate', 0.01)
-        ai_model_specific_config['crossover_rate'] = self.config.get('crossover_rate', 0.9)
-        ai_model_specific_config['selection_method'] = self.config.get('selection_method', 'tournament')
-        ai_model_specific_config['tournament_size'] = self.config.get('tournament_size', 5) # Added tournament_size
-        ai_model_specific_config['topk_k'] = self.config.get('topk_k', 10) # Added topk_k
-        ai_model_specific_config['elite_count'] = int(self.config.get('elite_count', 0))
-
-        # Pass the NEW hidden_size parameter from the main config to the AI model config
-        ai_model_specific_config['hidden_size'] = int(self.config.get('hidden_size', 16)) # <-- Pass hidden_size
-
-
-        ai_model_specific_config['population'] = {
-             'mutation_rate': ai_model_specific_config.get('mutation_rate'),
-             'crossover_rate': ai_model_specific_config.get('crossover_rate'),
-             'selection_method': ai_model_specific_config.get('selection_method'),
-             'elite_count': ai_model_specific_config.get('elite_count'),
-             'tournament_size': ai_model_specific_config.get('tournament_size'), # Pass tournament_size
-             'topk_k': ai_model_specific_config.get('topk_k'), # Pass topk_k
-             # Add hidden_size to population config as well, although trainer passes it directly
-             'hidden_size': ai_model_specific_config.get('hidden_size'),
-        }
-
-        # Fitness weights configuration (might be less relevant for data-driven MSE fitness but kept for compatibility)
-        ai_model_specific_config['fitness'] = {
-            'score_weight': self.config.get('score_weight', 1.0),
-            'survival_weight': self.config.get('survival_weight', 5.0),
-            'steps_weight': self.config.get('steps_weight', 0.02),
-            'entropy_score_weight': self.config.get('entropy_score_weight', 0.5),
-            'entropy_food_weight': self.config.get('entropy_food_weight', 0.0),
-        }
 
         # --- If resuming, find and load the best genome ---
         if self.resume_training:
@@ -106,25 +55,75 @@ class ExperimentRunner:
                  print("Resume training activated: Loaded genome data.")
 
 
-        # Instantiate the environment (used for running initial batch only in the new design)
-        render_game = self.config.get('render', False)
-        game_speed = self.config.get('game_speed', 10)
-        # The environment is primarily for generating raw data now. It's not used in the GA training loop.
-        self.environment = SnakeEnvironment(grid_size=self.grid_size, render=render_game, game_speed=game_speed)
+        # Extract configs for sub-components
+        # self.stat_model_name = self.config.get('stat_model', 'bayesian') # Not used for training data anymore
+        self.ai_model_name = self.config.get('ai_model', 'genetic')
+
+        # Ensure the AI model exists in the configuration
+        if self.ai_model_name not in self.config and self.ai_model_name != 'genetic':
+             print(f"Warning: Specific config for AI model '{self.ai_model_name}' not found in config. Using default.")
 
 
-        # Instantiate the Statistical Model Interface
-        # The stat model will now process historical data to produce input/target pairs
-        stat_interface_config = {'stat_model': self.stat_model_name, **stat_model_specific_config}
-        self.stat_model = StatisticalModelInterface(config=stat_interface_config)
+        # We don't instantiate the StatisticalModelInterface for training data anymore.
+        # stat_model_specific_config = self.config.get(self.stat_model_name, {})
+        ai_model_specific_config = self.config.get(self.ai_model_name, {})
+
+        # Pass relevant configs to the specific AI model config (GeneticTrainer)
+        ai_model_specific_config['population_size'] = int(self.config.get('population_size', 100))
+        ai_model_specific_config['num_generations'] = int(self.config.get('num_generations', 10))
+        ai_model_specific_config['mutation_rate'] = float(self.config.get('mutation_rate', 0.03)) # Updated default
+        ai_model_specific_config['crossover_rate'] = float(self.config.get('crossover_rate', 0.9))
+        ai_model_specific_config['selection_method'] = self.config.get('selection_method', 'tournament')
+        ai_model_specific_config['tournament_size'] = int(self.config.get('tournament_size', 5))
+        ai_model_specific_config['topk_k'] = int(self.config.get('topk_k', 10))
+        ai_model_specific_config['elite_count'] = int(self.config.get('elite_count', 5)) # Updated default
+
+        # Pass the NN architecture parameters and flags
+        ai_model_specific_config['hidden_size1'] = int(self.config.get('hidden_size1', 32)) # Updated default
+        ai_model_specific_config['hidden_size2'] = int(self.config.get('hidden_size2', 16)) # Updated default
+        ai_model_specific_config['use_he_initialization'] = self.config.get('use_he_initialization', True)
+        ai_model_specific_config['use_leaky_relu'] = self.config.get('use_leaky_relu', True)
+        ai_model_specific_config['normalize_features'] = self.config.get('normalize_features', True)
+
+
+        # Pass stagnation parameters to the AI model config
+        ai_model_specific_config['stagnation_threshold'] = float(self.config.get('stagnation_threshold', 0.001))
+        ai_model_specific_config['stagnation_generations'] = int(self.config.get('stagnation_generations', 20))
+        ai_model_specific_config['stagnation_mutation_boost'] = float(self.config.get('stagnation_mutation_boost', 0.1))
+
+        # Pass game evaluation config to the AI model config
+        ai_model_specific_config['games_per_agent'] = self.games_per_agent
+        ai_model_specific_config['grid_size'] = self.grid_size
+        ai_model_specific_config['render'] = self.render_game
+        ai_model_specific_config['game_speed'] = self.game_speed
+
+
+        ai_model_specific_config['population'] = {
+             'mutation_rate': ai_model_specific_config.get('mutation_rate'),
+             'crossover_rate': ai_model_specific_config.get('crossover_rate'),
+             'selection_method': ai_model_specific_config.get('selection_method'),
+             'elite_count': ai_model_specific_config.get('elite_count'),
+             'tournament_size': ai_model_specific_config.get('tournament_size'),
+             'topk_k': ai_model_specific_config.get('topk_k'),
+             # Pass NN/feature flags to population config as well
+             'hidden_size1': ai_model_specific_config.get('hidden_size1'),
+             'hidden_size2': ai_model_specific_config.get('hidden_size2'),
+             'use_he_initialization': ai_model_specific_config.get('use_he_initialization'),
+             'use_leaky_relu': ai_model_specific_config.get('use_leaky_relu'),
+             'normalize_features': ai_model_specific_config.get('normalize_features'),
+        }
+
+        # Fitness weights configuration (now used by FitnessCalculator for game results)
+        ai_model_specific_config['fitness'] = {
+            'score_weight': float(self.config.get('score_weight', 1.0)),
+            'steps_weight': float(self.config.get('steps_weight', 0.01)), # Updated default
+        }
+
 
         # Instantiate the AI Model (Genetic Trainer)
-        # The trainer will now train on processed statistical data
-        # Pass the AI model specific config which now includes 'hidden_size'
+        # The trainer will now manage game environments for evaluation.
+        # Pass the AI model specific config which now includes all necessary parameters.
         self.ai_model = GeneticTrainer(config=ai_model_specific_config, initial_genome_data=self.initial_genome_data)
-        # The trainer does NOT need the environment for evaluation games in the new design.
-        # The environment is only used by the runner to generate the initial batch of data.
-        # self.ai_model.set_evaluation_environment(self.environment) # This line should be removed
 
 
     def _find_and_load_latest_genome(self) -> list | None:
@@ -172,142 +171,48 @@ class ExperimentRunner:
         except (IOError, json.JSONDecodeError) as e:
             print(f"Error loading genome from {genome_file_path}: {e}")
             return None
+        except Exception as e:
+             print(f"An unexpected error occurred loading genome: {e}")
+             return None
 
 
     def run(self, results_dir: str):
         """
-        Executes a single experiment run according to the new data-driven plan.
+        Executes a single experiment run according to the direct GA plan.
 
         Args:
             results_dir: The specific run_XXX directory for saving this run's specific outputs (config, final genome, etc.).
         """
-        print(f"Starting experiment run with batch size {self.batch_size} in {results_dir}")
+        print(f"Starting experiment run in {results_dir}")
         # results_dir is already created by the executor
 
-        # --- Step A: Run Batch of Games & Reuse Previous Batch Data ---
-        # This batch adds new data to the historical pool
-        print("Running a new batch of games to add to historical data pool...")
-        current_batch_raw_data = self._run_game_batch() # Run the new batch using the environment
+        # --- Phase 1: Train AI Model by Playing Games ---
+        # The trainer now handles the game playing and evaluation loop internally.
+        print("Starting AI training via direct game evaluation...")
 
-        # Ensure the historical data directory exists
-        os.makedirs(self.historical_data_dir, exist_ok=True)
-
-        # Load existing historical raw data
-        historical_raw_data = self._load_historical_raw_data() # Method defined in this class
-
-        # Append the current batch data
-        historical_raw_data.extend(current_batch_raw_data)
-
-        # Save the updated historical raw data
-        self._save_historical_raw_data(historical_raw_data) # Method defined in this class
-
-        # --- Step B (Part 1): Process Historical Data with Statistical Model ---
-        # The stat model now processes the cumulative historical data to produce input/target pairs
-        print("Processing cumulative historical raw data with statistical model...")
-        # The stat model interface needs to process the cumulative file path and save to historical processed path
-        # This method should be defined in statistics/interface.py
-        # It should call the appropriate processing method in the selected stat model (e.g., BayesianModel)
-        processed_data_list = self.stat_model.process_batch_historical(
-            historical_raw_data_path=self.historical_raw_data_path,
-            output_path=self.historical_inputs_targets_path, # Save input/target pairs here
-            summary_path=self.historical_stat_summary_path # Save historical stats summary here
-        )
-        # Note: The output_path now points to the inputs_targets.json file.
-        # The stat_model.process_batch_historical should save the list of {'input_vector', 'expected_outcome'}
-
-        if not processed_data_list:
-             print("Warning: No processed data pairs generated from historical data. Cannot proceed with training.")
-             self.environment.close_render()
-             return # Stop if no data was processed
-
-
-        # --- Step B (Part 2) & C: Train AI Model using Processed Statistical Data ---
-        # The trainer will now load processed stats (input/target pairs) from the historical path
-        print("Starting AI training using historical processed statistical data...")
-        # The train method needs to accept the path to the inputs_targets.json file
-        # It will evaluate agents on this data, not via environment games.
+        # The train method in genetic/trainer.py is modified to handle game playing
         self.ai_model.train(
-            processed_stats_path=self.historical_inputs_targets_path, # Path to inputs_targets.json
             results_dir=results_dir, # Save this run's GA training results (summary, final genome) here
         )
-        # Note: The train method in genetic/trainer.py is modified to handle this
+        # Note: No processed_stats_path is passed anymore.
 
 
         print("Experiment run finished.")
 
-        # Close any open visualizations (from the initial batch run)
-        # The environment is only used for the initial batch generation now.
-        self.environment.close_render()
+        # No environment to close here, as the trainer manages them per generation evaluation.
+        # If you had a separate environment for a final evaluation game after training, you'd close it here.
 
 
-    def _run_game_batch(self) -> list:
-        """
-        Runs a batch of games using the environment and collects raw results.
-        This batch's data is added to the historical data pool.
-        Agents are NOT evaluated here for GA fitness in the new design.
-        """
-        print(f"Running a batch of {self.batch_size} games to generate new data...")
-        raw_batch_results = []
-
-        for i in range(self.batch_size):
-            # Added progress print to see batch execution
-            if (i + 1) % 10 == 0 or i == 0 or i == self.batch_size - 1:
-                print(f"  Generating data from game {i+1}/{self.batch_size}...")
-            # Run a single game episode with agent=None (random actions) for data generation
-            # Pass max_steps to prevent infinite games
-            # The environment's run_game returns the raw trial data
-            trial_result = self.environment.run_game(agent=None, max_steps=2000)
-            raw_batch_results.append(trial_result)
-
-        print("Game data generation batch finished.")
-        return raw_batch_results
-
-    # --- New methods for handling historical data ---
-    def _load_historical_raw_data(self) -> list:
-        """Loads cumulative historical raw data from file."""
-        historical_data = []
-        if not os.path.exists(self.historical_raw_data_path):
-            print(f"Historical raw data file not found at {self.historical_raw_data_path}. Starting historical data fresh.")
-            return historical_data # Return empty list if file doesn't exist
-        try:
-            with open(self.historical_raw_data_path, 'r') as f:
-                data = json.load(f)
-                # Ensure loaded data is a list
-                if isinstance(data, list):
-                    historical_data = data
-                    print(f"Loaded {len(historical_data)} records from historical raw data.")
-                else:
-                    print(f"Warning: Historical raw data file at {self.historical_raw_data_path} contains non-list data. Starting historical data fresh.")
-
-            return historical_data
-
-        except (IOError, json.JSONDecodeError) as e:
-            print(f"Error loading historical raw data from {self.historical_raw_data_path}: {e}. Starting historical data fresh.")
-            return [] # Return empty list on error
-        except Exception as e:
-             print(f"An unexpected error occurred loading historical raw data: {e}. Starting historical data fresh.")
-             return []
-
-
-    def _save_historical_raw_data(self, data: list):
-        """Saves cumulative historical raw data to file."""
-        # Ensure the historical directory exists
-        os.makedirs(self.historical_data_dir, exist_ok=True)
-        try:
-            with open(self.historical_raw_data_path, 'w') as f:
-                json.dump(data, f, indent=4)
-            print(f"Saved {len(data)} records to historical raw data at {self.historical_raw_data_path}")
-        except IOError as e:
-            print(f"Error saving historical raw data to {self.historical_raw_data_path}: {e}")
-        except Exception as e:
-             print(f"An unexpected error occurred saving historical raw data: {e}")
-
+    # Removed historical data handling methods as per Phase 1 plan
+    # def _run_game_batch(self) -> list: ...
+    # def _load_historical_raw_data(self) -> list: ...
+    # def _save_historical_raw_data(self, data: list): ...
 
     def _save_data(self, data, path: str):
         """
         (Original) Saves data (e.g., raw results of the current batch) to a JSON file
         within the current run_XXX directory.
-        This is kept for logging the raw data of each specific run.
+        This is kept for logging purposes if needed, but the main training data flow changes.
         """
         # ... (remains the same)
         try:

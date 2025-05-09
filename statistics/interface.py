@@ -11,6 +11,7 @@ class StatisticalModelInterface:
     """
     Interface and dispatcher for different statistical preprocessing models.
     Handles processing both single batch data (for logging) and cumulative historical data (for AI training).
+    Now handles processing historical data into input vectors and target vectors.
     """
     # Map model names from config to their respective classes
     STAT_MODELS = {
@@ -53,13 +54,17 @@ class StatisticalModelInterface:
         if self.model_instance is None:
              raise RuntimeError("Statistical model not initialized.")
 
-        print(f"Processing batch data from {raw_data_path} using {self.selected_model_name} model...")
+        print(f"Processing batch data from {raw_data_path} using {self.selected_model_name} model (single batch summary)...")
         # Call the original batch processing method (e.g., BayesianModel.process)
         # This method is expected to return a dictionary of summary statistics.
         try:
+            # Ensure the model instance has the 'process' method if calling it
+            if not hasattr(self.model_instance, 'process'):
+                 raise AttributeError(f"Statistical model '{self.selected_model_name}' does not have a 'process' method for single batch processing.")
+
             processed_data = self.model_instance.process(raw_data_path)
-        except AttributeError:
-            print(f"Error: Statistical model '{self.selected_model_name}' does not have a 'process' method for single batch processing.")
+        except AttributeError as e:
+            print(f"Error: {e}")
             processed_data = {} # Return empty if method doesn't exist
         except Exception as e:
             print(f"Error during single batch processing: {e}")
@@ -97,6 +102,9 @@ class StatisticalModelInterface:
             print(f"Processed statistical output saved to {output_path}")
         except IOError as e:
             print(f"Error saving processed data to {output_path}: {e}")
+        except Exception as e:
+             print(f"An unexpected error occurred saving processed data: {e}")
+
 
         # Save summary to summary_path (e.g., summary_stat.yaml in run_XXX)
         try:
@@ -107,10 +115,12 @@ class StatisticalModelInterface:
             print("Warning: PyYAML not installed. Cannot save summary.yaml.")
         except IOError as e:
             print(f"Error saving summary to {summary_path}: {e}")
+        except Exception as e:
+             print(f"An unexpected error occurred saving summary: {e}")
 
 
     # --- New method to process historical cumulative data ---
-    def process_batch_historical(self, historical_raw_data_path: str, output_path: str, summary_path: str):
+    def process_batch_historical(self, historical_raw_data_path: str, output_path: str, summary_path: str) -> list:
         """
         Processes cumulative historical raw data using the selected statistical model's
         historical processing method. Saves output to a designated historical location
@@ -120,18 +130,27 @@ class StatisticalModelInterface:
             historical_raw_data_path: Path to the cumulative historical_raw_data.json file.
             output_path: Path where the cumulative processed data (e.g., inputs_targets.json) should be saved.
             summary_path: Path where the historical statistical summary should be saved (e.g., summary_historical_stat.yaml).
+
+        Returns:
+            A list of dictionaries, where each dictionary contains an 'input_vector'
+            and an 'expected_outcome' vector.
         """
         if self.model_instance is None:
              raise RuntimeError("Statistical model not initialized.")
 
-        print(f"Processing cumulative historical data from {historical_raw_data_path} using {self.selected_model_name} model...")
+        print(f"Processing cumulative historical data from {historical_raw_data_path} using {self.selected_model_name} model (historical processing)...")
 
-        # --- CORRECTED CALL: Call the new historical processing method ---
+        # --- Call the new historical processing method ---
         # This method is expected to return a list of dictionaries (input/target pairs).
         try:
+            # Ensure the model instance has the 'process_historical_data' method
+            if not hasattr(self.model_instance, 'process_historical_data'):
+                 raise AttributeError(f"Statistical model '{self.selected_model_name}' does not have a 'process_historical_data' method required for historical processing.")
+
             processed_data_list = self.model_instance.process_historical_data(historical_raw_data_path)
-        except AttributeError:
-             raise AttributeError(f"Statistical model '{self.selected_model_name}' does not have a 'process_historical_data' method required for historical processing.")
+        except AttributeError as e:
+             print(f"Error: {e}")
+             processed_data_list = [] # Return empty list on error
         except Exception as e:
              print(f"Error during historical data processing: {e}")
              processed_data_list = [] # Return empty list on error
@@ -160,6 +179,9 @@ class StatisticalModelInterface:
         except TypeError as e:
              print(f"TypeError during JSON saving of historical data: {e}. Data might contain non-JSON serializable types.")
              # You might want to inspect processed_data_list here to see the types
+        except Exception as e:
+             print(f"An unexpected error occurred saving historical data: {e}")
+
 
         # Save historical summary (can be a summary of the historical data)
         # The processed_data_list is a list of pairs, not a summary dict.
@@ -179,6 +201,9 @@ class StatisticalModelInterface:
             print("Warning: PyYAML not installed. Cannot save historical summary.yaml.")
         except IOError as e:
             print(f"Error saving historical summary to {summary_path}: {e}")
+        except Exception as e:
+             print(f"An unexpected error occurred saving historical summary: {e}")
+
 
         # Note: This method processes the cumulative historical file.
         # Its output (inputs_targets.json) is used by the trainer.

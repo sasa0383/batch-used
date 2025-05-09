@@ -7,7 +7,11 @@ import numpy as np
 # Assuming state.py and actions.py are in the same game directory
 from .actions import ACTION_DELTAS, ACTION_MAP, ACTION_MAP_INV, UP, DOWN, LEFT, RIGHT
 from .state import GameState
-from .visualizer import GameVisualizer # Ensure this is imported if render is used
+# Ensure this is imported if render is used
+try:
+    from .visualizer import GameVisualizer
+except ImportError:
+    GameVisualizer = None # Handle cases where visualizer might not be available
 
 
 class SnakeEnvironment:
@@ -26,8 +30,22 @@ class SnakeEnvironment:
         self.state = GameState(grid_size) # Initialize the GameState object
         self.render = render
         self.game_speed = game_speed
-        self.visualizer = None
-        # Note: visualizer is instantiated lazily within __init__ if render is True
+        self.visualizer = None # Initialize visualizer to None
+
+        # --- Initialize visualizer directly in __init__ if rendering is enabled ---
+        if self.render and GameVisualizer is not None:
+             try:
+                 print("Attempting to initialize game visualizer...") # Debug print
+                 self.visualizer = GameVisualizer(grid_size=self.grid_size)
+                 print("Game visualizer initialized successfully.") # Debug print
+             except Exception as e:
+                  print(f"Warning: Failed to initialize visualizer: {e}. Rendering disabled.")
+                  self.render = False # Disable rendering if initialization fails
+                  self.visualizer = None
+        elif self.render and GameVisualizer is None:
+             print("Warning: GameVisualizer class not available (matplotlib not installed?). Rendering disabled.")
+             self.render = False
+        # --------------------------------------------------------------------------
 
 
     def reset(self):
@@ -35,6 +53,7 @@ class SnakeEnvironment:
         self.state = GameState(self.grid_size) # Create a fresh GameState instance
         if self.visualizer:
             self.visualizer.reset() # Call the visualizer's reset method
+        # No need to call _ensure_visualizer_initialized() here anymore
         return self.state.to_dict()
 
 
@@ -79,24 +98,28 @@ class SnakeEnvironment:
             reverse_directions = {
                 UP: DOWN, DOWN: UP, LEFT: RIGHT, RIGHT: LEFT
             }
-            if action != reverse_directions.get(current_direction_int, -1):
+            if current_direction_int is not None and action != reverse_directions.get(current_direction_int, -1):
                 # Valid move (not reversing)
                 dy, dx = ACTION_DELTAS[action]
                 new_head = (head_x + dy, head_y + dx)
                 new_direction_str = ACTION_MAP[action]
                 self.state.direction = new_direction_str
             else:
-                 # Attempted reversal, keep moving in current direction
-                 dy, dx = ACTION_DELTAS[current_direction_int]
+                 # Attempted reversal or invalid current_direction_int, keep moving in current direction delta
+                 # Find the delta for the current direction string
+                 current_dir_delta = ACTION_DELTAS.get(current_direction_int) if current_direction_int is not None else (0,0)
+                 dy, dx = current_dir_delta
                  new_head = (head_x + dy, head_y + dx)
                  # Direction string remains the same
+
         else:
             # Invalid action integer
             self.state.game_over = True # Set game over on the state object
             self.state.collisions = True # Set collisions on the state object
             reward = -1 # Large penalty
             # If visualization is enabled, update it to show the final state before returning
-            if self.visualizer: self._ensure_visualizer_initialized(); self.visualizer.update(self.state)
+            if self.visualizer: # Check before using visualizer
+                 self.visualizer.update(self.state)
             return self.state.to_dict(), reward, True, {"message": "Invalid action", "collision_type": "invalid_action"}
 
 
@@ -106,7 +129,8 @@ class SnakeEnvironment:
             self.state.collisions = True # Set collisions on the state object
             reward = -1 # Penalty for hitting wall
             # If visualization is enabled, update it to show the final state before returning
-            if self.visualizer: self._ensure_visualizer_initialized(); self.visualizer.update(self.state)
+            if self.visualizer: # Check before using visualizer
+                 self.visualizer.update(self.state)
             return self.state.to_dict(), reward, True, {"message": "Wall collision", "collision_type": "wall"}
 
         # Check for collision with self (body)
@@ -116,7 +140,8 @@ class SnakeEnvironment:
              self.state.collisions = True # Set collisions on the state object
              reward = -1 # Penalty for hitting self
              # If visualization is enabled, update it to show the final state before returning
-             if self.visualizer: self._ensure_visualizer_initialized(); self.visualizer.update(self.state)
+             if self.visualizer: # Check before using visualizer
+                 self.visualizer.update(self.state)
              return self.state.to_dict(), reward, True, {"message": "Self collision", "collision_type": "self"}
 
 
@@ -148,11 +173,10 @@ class SnakeEnvironment:
              info["message"] = "Game finished"
 
         # Update visualizer AFTER state is updated, BEFORE returning
-        if self.visualizer:
-            self._ensure_visualizer_initialized() # Ensure visualizer is created if render is True
-            self.visualizer.update(self.state)
-            if self.game_speed > 0:
-                time.sleep(1 / self.game_speed)
+        if self.visualizer: # Check before using visualizer
+             self.visualizer.update(self.state)
+             if self.game_speed > 0:
+                 time.sleep(1 / self.game_speed)
 
         return self.state.to_dict(), reward, done, info
 
@@ -172,27 +196,23 @@ class SnakeEnvironment:
 
     def render_game(self):
          """Explicitly trigger a render update if not already happening."""
-         if self.visualizer:
-              self._ensure_visualizer_initialized()
+         if self.visualizer: # Check before using visualizer
               self.visualizer.update(self.state)
 
-    def close_render(self):
-         """Closes the visualization window."""
-         if self.visualizer:
-             self.visualizer.close()
+    # --- Added the close method to SnakeEnvironment ---
+    def close(self):
+        """Closes the visualization window if a visualizer exists."""
+        if self.visualizer:
+            try:
+                print("Closing visualization window...") # Debug print
+                self.visualizer.close()
+                print("Visualization window closed.") # Debug print
+            except Exception as e:
+                print(f"Warning: Could not close visualization window: {e}")
+        # No other resources to close in this basic environment
 
-    def _ensure_visualizer_initialized(self):
-        """Ensures the visualizer is initialized if render is True."""
-        if self.render and self.visualizer is None:
-             try:
-                from .visualizer import GameVisualizer
-                self.visualizer = GameVisualizer(self.grid_size)
-             except ImportError:
-                print("Warning: visualizer.py not found or dependencies missing. Rendering disabled.")
-                self.render = False # Disable rendering if import fails
-             except Exception as e:
-                 print(f"Warning: Failed to initialize visualizer: {e}. Rendering disabled.")
-                 self.render = False
+    # --- Removed the _ensure_visualizer_initialized helper function ---
+    # It's no longer needed with the direct initialization in __init__
 
 
     def get_observation(self):
@@ -204,14 +224,17 @@ class SnakeEnvironment:
         observation = np.zeros((self.grid_size, self.grid_size), dtype=int)
         # Mark snake body
         for segment in self.state.snake:
+            # Added boundary check for safety
             if 0 <= segment[0] < self.grid_size and 0 <= segment[1] < self.grid_size:
                 observation[segment[0], segment[1]] = 1 # Snake body (row, col)
         # Mark snake head
         head = self.state.snake[0]
+        # Added boundary check for safety
         if 0 <= head[0] < self.grid_size and 0 <= head[1] < self.grid_size:
              observation[head[0], head[1]] = 2 # Snake head (row, col)
         # Mark food
         food = self.state.food
+        # Added boundary check for safety
         if 0 <= food[0] < self.grid_size and 0 <= food[1] < self.grid_size:
             observation[food[0], food[1]] = 3 # Food (row, col)
 
@@ -230,7 +253,11 @@ class SnakeEnvironment:
         grid_size = state_dict['grid_size']
         snake = state_dict['snake']
         food = state_dict['food']
-        head_x, head_y = snake[0]
+        if not snake: # Handle empty snake case
+            head_x, head_y = (0, 0)
+        else:
+            head_x, head_y = snake[0]
+
 
         features = []
 
@@ -270,7 +297,7 @@ class SnakeEnvironment:
 
         # Feature 7-10: Current direction (one-hot encoded)
         direction_one_hot = [0, 0, 0, 0] # UP, DOWN, LEFT, RIGHT
-        current_direction = state_dict['direction']
+        current_direction = state_dict.get('direction', 'RIGHT') # Use get with default for safety
         if current_direction == 'UP': direction_one_hot[0] = 1
         elif current_direction == 'DOWN': direction_one_hot[1] = 1
         elif current_direction == 'LEFT': direction_one_hot[2] = 1
@@ -285,7 +312,8 @@ class SnakeEnvironment:
         food_dir_right = 1 if food[1] > head_y and food[0] == head_x else 0
         features.extend([food_dir_up, food_dir_down, food_dir_left, food_dir_right])
 
-        # Total features is 14
+        # Total features is 14 (Note: This is the OLD feature set, not the new 39)
+        # This method is marked as NOT used for the GA training, so it's okay it's different.
 
         return np.array(features)
 
@@ -305,16 +333,19 @@ class SnakeEnvironment:
             A dictionary containing the raw results of the game.
         """
         # Ensure visualizer is initialized if rendering is enabled before the game starts
-        self._ensure_visualizer_initialized()
+        # This call is needed here if run_game is used independently of the trainer loop
+        # if self.render: # Check render flag before attempting initialization
+        #     self._ensure_visualizer_initialized() # Removed helper, rely on __init__
 
         self.reset() # Reset the environment state and visualizer
         done = False
         steps = 0
 
         # Optional: Initial render pause
-        if self.visualizer and self.game_speed > 0:
-             self.visualizer.update(self.state) # Draw initial state
-             time.sleep(1 / self.game_speed) # Pause at start
+        # This happens inside the __init__ if visualizer is created there
+        # if self.visualizer and self.game_speed > 0:
+        #      self.visualizer.update(self.state) # Draw initial state
+        #      time.sleep(1 / self.game_speed) # Pause at start
 
         while not done and steps < max_steps:
             # In the data-driven approach, the agent (if present) would typically
@@ -339,13 +370,13 @@ class SnakeEnvironment:
 
             # Step the environment, which also handles visualizer update per step
             new_state_dict, reward, done, info = self.step(action)
-            steps += 1
+            steps += 1 # This steps count is local to run_game, rely on state.steps for game duration
 
         # Game finished or max steps reached
         # Collect raw data for this trial
         raw_trial_data = {
             "score": self.state.score,
-            "steps": self.state.steps,
+            "steps": self.state.steps, # Use steps from state object
             "food": self.state.food_eaten_count,
             "collisions": self.state.collisions, # True if collided
             # --- Log the final state dictionary ---
@@ -354,7 +385,7 @@ class SnakeEnvironment:
         }
 
         # Final visualizer update after game ends
-        if self.visualizer:
+        if self.visualizer: # Check before using visualizer
              self.visualizer.update(self.state) # Update to show final state (e.g., collision)
              # Add a slightly longer pause at the end of the game
              time.sleep(1.5) # Pause briefly on game over or max steps

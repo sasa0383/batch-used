@@ -1,31 +1,74 @@
-# Example YAML Config Update
-experiment_name: snake_nn_evolution
-ai_model: genetic
-stat_model: bayesian
-batch_size: 500
-grid_size: 10
+# project-root/experiments/configs/exp_genetic.yaml
 
-# GA hyperparameters
-population_size: 100
-num_generations: 500
-mutation_rate: 0.01
-crossover_rate: 0.9
-elite_count: 5
-selection_method: tournament
-tournament_size: 5
-topk_k: 10
+# 📚 Sample Config File (`exp_genetic.yaml`) for Direct Genetic Algorithm Training
 
-# NN config
-hidden_size: 16  # <--- NEW parameter for the Neural Network hidden layer size
+experiment_name: "genetic_direct_nn_run" # Updated experiment name
 
-# Fitness weights (may be less relevant for MSE fitness)
-score_weight: 1.0
-survival_weight: 5.0
-steps_weight: 0.02
-entropy_score_weight: 0.5
-entropy_food_weight: 0.0
+# Models
+ai_model: "genetic"
+# stat_model: "bayesian" # Removed dependency on stat model for training
 
-# Other settings
-render: False
-game_speed: 10
-resume_training: False
+# --- Game Evaluation Settings ---
+# Parameters related to how games are run for evaluation
+game_evaluation: # <--- Add this key
+  grid_size: 10
+  render_training: True # <--- Move render under here and rename to render_training for clarity
+  game_speed: 10
+  games_per_agent: 5 # <--- Move games_per_agent under here
+  max_steps_per_game: 500 # <--- Ensure max_steps_per_game is also under here
+
+# --- Option for Resuming Training (Keep at top level or under ga) ---
+# Placing under ga seems more logical
+ga:
+  population_size: 100
+  num_generations: 5000
+  mutation_rate: 0.03
+  crossover_rate: 0.9
+  elite_count: 5
+  selection_method: "tournament"
+  tournament_size: 5
+  # topk_k: ... (if used)
+  resume_training: False # <--- Moved resume_training under ga
+
+# AI hyperparameters (Genetic Algorithm) - These should be passed to the GeneticTrainer
+# ... other GA params here if not already under ga ...
+
+# --- Neural Network Architecture (Can be a separate section or under ga/ai) ---
+# Let's create a separate section for clarity
+neural_network: # <--- Add this section
+  # Input size (derived from GameState) and Output size (4 actions)
+  # are determined by agent.py and hardcoded in trainer.py/agent.py for consistency.
+  # Define hidden layer sizes
+  hidden_size1: 32
+  hidden_size2: 16
+  output_size: 4 # Should be 4 for Snake actions
+
+  # --- NN Training Tweaks ---
+  use_he_initialization: True
+  use_leaky_relu: True
+  normalize_features: True
+
+# --- Fitness Function Weights (for direct game evaluation) ---
+# These weights determine how game metrics contribute to fitness.
+# Passed to the FitnessCalculator.
+fitness:
+  score_weight: 1.0
+  steps_weight: 0.01
+
+# --- Stagnation Detection and Handling ---
+# Parameters for detecting if the GA is stuck and taking action (e.g., boosting mutation)
+stagnation: # <--- Add this section
+  stagnation_threshold: 0.001
+  stagnation_generations: 20
+  stagnation_mutation_boost: 0.1
+
+# Stat model config (Bayesian) - Kept for potential future use (Phase 5) but not used in Phase 1 training
+# statistical_model: # <--- Optional section if adding stat model configs
+#   bayesian:
+#     prior: uniform # Placeholder
+#     confidence_interval: 95
+#     use_entropy: True
+
+# Optional: Grid search parameters (not implemented in current code)
+# grid_search:
+#...

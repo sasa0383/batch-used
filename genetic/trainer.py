@@ -4,23 +4,24 @@ import json
 import os
 import yaml
 import numpy as np
+import time # Import time for stagnation check
+# Import necessary components for direct evaluation
+from game.environment import SnakeEnvironment # Now needed for evaluation
 from .population import Population
 from .fitness import FitnessCalculator
 from .agent import GeneticAgent # Import GeneticAgent for type hinting and clarity
-
-# Need to import the game environment if it's still used anywhere (e.g., for initial batch in runner)
-# But the trainer itself no longer uses it for evaluation in the new design.
-# from game.environment import SnakeEnvironment # Removed direct dependency in trainer
 
 
 class GeneticTrainer:
     """
     Manages the Genetic Algorithm training process across generations.
-    In the new design, evaluates agents based on processed statistical data.
-    Supports initializing from a previous genome.
-    Evolves agents using a 1-hidden-layer neural network architecture.
+    Evaluates agents by having them play games directly.
+    Supports resuming training from a previous genome.
+    Evolves agents using a 2-hidden-layer neural network architecture.
+    Includes basic monitoring and stagnation handling.
     """
 
+    # Modify __init__ to accept environment config and NN/feature flags
     def __init__(self, config=None, initial_genome_data: list | None = None):
         """
         Initializes the GA trainer.
@@ -28,265 +29,255 @@ class GeneticTrainer:
         Args:
             config: Configuration dictionary for the GA (population_size, num_generations,
                     mutation_rate, crossover_rate, selection_method, etc.).
-                    Includes fitness config, hidden_size, and implicit genome size info
-                    (derived from expected features and outputs).
+                    Includes game evaluation config, fitness config, NN architecture sizes,
+                    NN/feature flags, and stagnation parameters.
             initial_genome_data: Optional list representing the genome to start the first generation from.
                                 If None, the population starts randomly.
         """
         self.config = config if config is not None else {}
-        self.initial_genome_data = initial_genome_data
-
-        self.population_size = int(self.config.get('population_size', 100))
-        self.num_generations = int(self.config.get('num_generations', 10))
-
-        self.population_config = self.config.get('population', {})
+        self.ga_config = self.config.get('ga', {})
+        self.nn_config = self.config.get('neural_network', {})
+        self.game_eval_config = self.config.get('game_evaluation', {})
         self.fitness_config = self.config.get('fitness', {})
-
-        # --- Define the neural network architecture sizes ---
-        # Number of input features (from statistics/bayesian.py)
-        self.num_features = 27 # <-- Matches the number of features in statistics/bayesian.py
-        # Number of output values (predicting a single score)
-        self.num_outputs = 1 # <-- Agent outputs a single value
-
-        # Hidden layer size (from config, default to 16)
-        self.hidden_size = int(self.config.get('hidden_size', 16))
-        # ----------------------------------------------------
-
-        # --- Calculate Genome size based on the NN architecture ---
-        # Genome size = (Input * Hidden) + Hidden + (Hidden * Output) + Output
-        self.genome_size = (self.num_features * self.hidden_size) + self.hidden_size + \
-                           (self.hidden_size * self.num_outputs) + self.num_outputs
-        # ----------------------------------------------------------
-
-        # Check if genome_size is explicitly set in config (should be ignored in favor of calculated size)
-        if 'genome_size' in self.config and int(self.config['genome_size']) != self.genome_size:
-             print(f"Warning: Ignoring 'genome_size' ({self.config['genome_size']}) in config. Calculated size based on NN architecture is {self.genome_size}.")
+        self.stagnation_config = self.config.get('stagnation', {})
 
 
-        # Pass initial_genome_data, num_features, num_outputs, AND hidden_size to the Population
-        self.population = Population(
-            population_size=self.population_size,
-            genome_size=self.genome_size, # Use the calculated genome_size
-            config=self.population_config,
-            initial_genome_data=self.initial_genome_data, # Pass the loaded genome data
-            num_features=self.num_features, # <-- Pass num_features
-            num_outputs=self.num_outputs, # <-- Pass num_outputs
-            hidden_size=self.hidden_size # <-- Pass hidden_size
-        )
-
-        # The FitnessCalculator is currently not used by _evaluate_population_on_data,
-        # as fitness is calculated directly as -MSE in the trainer.
-        # self.fitness_calculator = FitnessCalculator(config=self.fitness_config)
+        self.population_size = self.ga_config.get('population_size', 100)
+        self.num_generations = self.ga_config.get('num_generations', 1000)
+        self.mutation_rate = self.ga_config.get('mutation_rate', 0.01)
+        self.crossover_rate = self.ga_config.get('crossover_rate', 0.7)
+        self.selection_method = self.ga_config.get('selection_method', 'tournament') # 'tournament' or 'elitism'
+        self.tournament_size = self.ga_config.get('tournament_size', 5) # For tournament selection
+        self.elitism_count = self.ga_config.get('elitism_count', 2) # For elitism selection
 
 
-        self.generation_history = [] # To store summary data per generation
+        # --- Neural Network and Feature Configuration ---
+        # Ensure these match the agent.py definition
+        # Based on the user's feature list, the number of input features is 39.
+        self.num_features = 39 # Fixed based on the new feature list
+        self.num_outputs = self.nn_config.get('output_size', 4) # Should be 4 for Snake actions
+        self.hidden_size1 = self.nn_config.get('hidden_size1', 32)
+        self.hidden_size2 = self.nn_config.get('hidden_size2', 16)
 
+        self.use_he_initialization = self.nn_config.get('use_he_initialization', True)
+        self.use_leaky_relu = self.nn_config.get('use_leaky_relu', True)
+        self.normalize_features = self.nn_config.get('normalize_features', True) # Feature normalization flag
 
-    # The set_evaluation_environment method is no longer needed in the new design
-    # def set_evaluation_environment(self, env):
-    #     """Sets the game environment to be used for agent evaluation."""
-    #     self._evaluation_environment = env
+        # Calculate genome size based on the NN architecture and number of features
+        self.genome_size = (self.num_features * self.hidden_size1) + self.hidden_size1 + \
+                           (self.hidden_size1 * self.hidden_size2) + self.hidden_size2 + \
+                           (self.hidden_size2 * self.num_outputs) + self.num_outputs
 
+        if self.genome_size <= 0:
+             raise ValueError(f"Calculated genome size ({self.genome_size}) is invalid.")
 
-    def train(self, processed_stats_path: str, results_dir: str):
-        """
-        Runs the GA training process for a specified number of generations.
-        Evaluates agents based on processed statistical data from processed_stats_path.
-
-        Args:
-            processed_stats_path: Path to the inputs_targets.json file containing
-                                  processed statistical data (input/target pairs).
-            results_dir: Directory to save training results (summary, best genome).
-        """
-        # Load processed statistical data for evaluation
-        try:
-            with open(processed_stats_path, 'r') as f:
-                processed_data_pairs = json.load(f)
-            print(f"Loaded {len(processed_data_pairs)} data pairs from {processed_stats_path} for training.")
-        except FileNotFoundError:
-            print(f"Error: Processed statistical data file not found at {processed_stats_path}. Cannot train.")
-            return
-        except json.JSONDecodeError:
-            print(f"Error: could not decode JSON from {processed_stats_path}")
-            return
-        except Exception as e:
-             print(f"An unexpected error occurred loading data from {processed_stats_path}: {e}")
-             return
-
-        if not processed_data_pairs:
-             print("Warning: Processed statistical data is empty. Cannot train.")
-             return
-
-        # --- Ensure the number of features in the data matches the agent's expectation ---
-        if processed_data_pairs:
-             first_input_vector = processed_data_pairs[0].get('input_vector')
-             if first_input_vector is not None and len(first_input_vector) != self.num_features:
-                  print(f"Error: Feature vector size mismatch in loaded data ({len(first_input_vector) if first_input_vector is not None else 'None'}) vs expected ({self.num_features}). Cannot train.")
-                  print(f"Please ensure the number of features calculated in statistics/bayesian.py::process_historical_data matches genetic/trainer.py::num_features ({self.num_features}).")
-                  return
-
-        print(f"Starting GA training for {self.num_generations} generations with population size {self.population_size}")
-        print(f"Neural Network Architecture: Input={self.num_features}, Hidden={self.hidden_size}, Output={self.num_outputs}")
+        print(f"Neural Network Architecture: Input={self.num_features}, Hidden1={self.hidden_size1}, Hidden2={self.hidden_size2}, Output={self.num_outputs}")
         print(f"Calculated Genome Size: {self.genome_size}")
 
 
-        for generation in range(self.num_generations):
-            print(f"--- Generation {generation + 1}/{self.num_generations} ---")
+        # --- Game Evaluation Configuration ---
+        self.games_per_agent = self.game_eval_config.get('games_per_agent', 5)
+        self.grid_size = self.game_eval_config.get('grid_size', 10)
+        self.max_steps_per_game = self.game_eval_config.get('max_steps_per_game', 500) # Max steps to prevent infinite games
+        self.render_training = self.game_eval_config.get('render_training', False) # Whether to render games during training
 
-            # Evaluate each agent using the processed statistical data
-            self._evaluate_population_on_data(processed_data_pairs)
-
-            # Record generation summary
-            best_agent = self.population.get_best_agent()
-            if not self.population.get_agents() or all(a.get_fitness() is None for a in self.population.get_agents()):
-                 avg_fitness = 0.0
-                 best_fitness = -float('inf') # Use negative infinity as initial best fitness
-                 best_genome = None
-            else:
-                 # Filter out None fitness values before calculating mean
-                 valid_fitness_scores = [a.get_fitness() for a in self.population.get_agents() if a.get_fitness() is not None]
-                 avg_fitness = np.mean(valid_fitness_scores) if valid_fitness_scores else 0.0
-                 best_fitness = best_agent.get_fitness() if best_agent and best_agent.get_fitness() is not None else -float('inf')
-                 best_genome = best_agent.get_genome().tolist() if best_agent and best_agent.get_genome() is not None else None # Save best genome as list
+        # --- DEBUG PRINT ---
+        print(f"DEBUG: Trainer loaded render_training config: {self.render_training}")
+        # -------------------
 
 
-            generation_summary = {
-                'generation': generation + 1,
-                'best_fitness': float(best_fitness), # Ensure float
-                'average_fitness': float(avg_fitness), # Ensure float
-                'best_genome': best_genome # Save best genome as list
-            }
-            self.generation_history.append(generation_summary)
+        # --- Fitness Configuration ---
+        self.fitness_calculator = FitnessCalculator(config=self.fitness_config)
 
-            print(f"Generation {generation + 1}: Best Fitness = {generation_summary['best_fitness']:.4f}, Avg Fitness = {generation_summary['average_fitness']:.4f}")
-
-
-            # Create the next generation (unless it's the last generation)
-            if generation < self.num_generations - 1:
-                self.population.create_next_generation()
+        # --- Stagnation Configuration ---
+        self.stagnation_generations = self.stagnation_config.get('stagnation_generations', 50)
+        self.stagnation_threshold = self.stagnation_config.get('stagnation_threshold', 0.01) # Minimum improvement to reset stagnation
+        self._best_fitness_history = [] # To track best fitness over generations for stagnation check
+        self._last_improvement_generation = 0 # To track when the last significant improvement occurred
 
 
-        # Training finished
-        print("GA training complete.")
+        # --- Population Initialization ---
+        self.population = Population(
+            population_size=self.population_size,
+            genome_size=self.genome_size, # Pass the calculated genome size
+            config=self.ga_config,
+            initial_genome_data=initial_genome_data,
+            num_features=self.num_features, # Pass num_features
+            num_outputs=self.num_outputs, # Pass num_outputs
+            hidden_size1=self.hidden_size1, # Pass hidden sizes
+            hidden_size2=self.hidden_size2,
+            use_he_initialization=self.use_he_initialization, # Pass NN flags
+            use_leaky_relu=self.use_leaky_relu,
+            normalize_features=self.normalize_features, # Pass feature normalization flag
+            grid_size=self.grid_size # Pass grid size
+        )
 
-        # Save final results
-        self._save_training_results(results_dir)
 
-
-    # --- Method to evaluate population based on processed data ---
-    def _evaluate_population_on_data(self, data_pairs: list):
+    def train(self, results_dir: str):
         """
-        Evaluates the fitness of each agent based on processed statistical data pairs.
-        Fitness is calculated as the negative Mean Squared Error (-MSE) between
-        the agent's predicted score and the actual score for each data pair.
+        Runs the Genetic Algorithm training process.
 
         Args:
-            data_pairs: A list of dictionaries, each containing 'input_vector' and 'expected_outcome' (actual score).
+            results_dir: Directory to save training results (summaries, best genome).
         """
-        agents = self.population.get_agents()
-        if not agents:
-            print("Warning: Population is empty, cannot evaluate on data.")
-            return
+        print(f"Starting GA training for {self.num_generations} generations with population size {self.population_size}")
+        print(f"Each agent will play {self.games_per_agent} games per generation for evaluation.")
 
-        num_data_pairs = len(data_pairs)
-        if num_data_pairs == 0:
-             print("Warning: No data pairs provided for evaluation. Setting fitness to -inf for all agents.")
-             for agent in agents:
-                  agent.set_fitness(-float('inf'))
-             return
+        training_summary = [] # To store summary stats for each generation
 
-        # Evaluate each agent on the entire dataset of input/target pairs
-        for i, agent in enumerate(agents):
-            # print(f"  Evaluating Agent {i+1}/{len(agents)} on data...") # Optional debug
+        for generation in range(1, self.num_generations + 1):
+            print(f"--- Generation {generation}/{self.num_generations} ---")
 
-            total_squared_error = 0.0
-            valid_data_points = 0 # Count data points successfully processed for this agent
+            # 1. Evaluate the population by playing games
+            print(f"Evaluating population by playing {self.games_per_agent} games per agent...")
+            self._evaluate_population_by_playing()
 
-            for data_pair in data_pairs:
-                input_vector = data_pair.get('input_vector')
-                expected_outcome = data_pair.get('expected_outcome') # Actual final score from the trial
+            # 2. Calculate and store generation summary
+            generation_summary = self._calculate_generation_summary(generation)
+            training_summary.append(generation_summary)
+            print(f"Generation {generation}: Best Fitness = {generation_summary['best_fitness']:.4f}, Avg Fitness = {generation_summary['average_fitness']:.4f}, Diversity = {generation_summary['diversity']:.4f}")
 
-                # Basic validation of data pair
-                if input_vector is None or expected_outcome is None:
-                     print(f"Warning: Skipping data pair due to missing 'input_vector' or 'expected_outcome'.")
-                     continue
-
-                # Ensure the input vector size matches the agent's expectation
-                if len(input_vector) != agent.num_features:
-                     print(f"Warning: Data pair input vector size mismatch ({len(input_vector)}) vs expected ({agent.num_features}). Skipping this data pair for Agent {i+1}.")
-                     continue # Skip this data pair if sizes don't match
-
-                try:
-                    # Agent decides output (predicted score) based on the input vector
-                    # The agent's decide method now expects the statistical feature vector (size 27)
-                    # and should return a single float (predicted score).
-                    predicted_score = agent.decide(np.array(input_vector)) # Pass input as numpy array
-
-                    # Ensure the output is a single number
-                    if not isinstance(predicted_score, (int, float)):
-                         print(f"Warning: Agent.decide did not return a single number for data pair. Got {type(predicted_score)}. Skipping fitness calculation for this data pair.")
-                         # Assign a very high error for this specific data pair
-                         error = float('inf')
-                    else:
-                         # Calculate squared error for this data pair
-                         error = (predicted_score - expected_outcome) ** 2
-                         valid_data_points += 1 # Increment if processed successfully
-
-                except Exception as e:
-                     print(f"Error during agent.decide for data pair: {e}. Assigning high error for this data pair.")
-                     error = float('inf') # Assign a very high error on error
-                     # Do NOT increment valid_data_points here
-
-                total_squared_error += error # Accumulate squared error
-
-            # Calculate Mean Squared Error (MSE)
-            if valid_data_points == 0:
-                 mse = float('inf') # Avoid division by zero
-                 print(f"Warning: No valid data points processed for Agent {i+1}. MSE is infinite.")
-            elif total_squared_error == float('inf'):
-                 mse = float('inf') # If any single error was infinite
-            else:
-                 mse = total_squared_error / valid_data_points
+            # 3. Check for stagnation
+            if self._check_stagnation(generation, generation_summary['best_fitness']):
+                 print(f"Training stagnated at generation {generation}. Best fitness did not improve significantly for {self.stagnation_generations} generations.")
+                 break # Stop training if stagnated
 
 
-            # Fitness is the negative of the MSE (higher fitness = lower error)
-            # Less negative is better. Initial random agents will have high MSE (low fitness).
-            agent_fitness = -mse
+            # 4. Create the next generation (selection, crossover, mutation)
+            if generation < self.num_generations:
+                 print("Creating next generation...")
+                 self.population.create_next_generation()
 
-            # Set the calculated fitness for the agent
+        print("\nGA training finished.")
+        self._save_training_results(results_dir, training_summary)
+
+
+    def _evaluate_population_by_playing(self):
+        """
+        Evaluates each agent in the population by having it play games.
+        Sets the fitness for each agent based on game results.
+        """
+        # Create environments for evaluation. Could potentially parallelize this.
+        environments = [SnakeEnvironment(grid_size=self.grid_size, render=self.render_training, game_speed=self.game_eval_config.get('game_speed', 10)) for _ in range(self.games_per_agent)]
+
+        for agent in self.population.get_agents():
+            game_results = []
+            for env in environments:
+                # Reset environment for a new game
+                env.reset()
+                game_over = False
+                steps = 0
+
+                # Note: max_steps_per_game is read from self.game_eval_config
+                while not game_over and steps < self.max_steps_per_game:
+                    # Get the current state from the environment
+                    current_state = env.state
+
+                    # Agent decides the next action based on the current state features
+                    action = agent.decide(current_state)
+
+                    # Take the action in the environment
+                    new_state_dict, reward, done, info = env.step(action)
+                    # If you need the GameState object after step, you'd recreate it:
+                    # new_state = GameState.from_dict(new_state_dict)
+
+
+                    # Update game_over flag and steps
+                    game_over = done
+                    steps += 1 # Steps are also incremented in env.step, so be careful not to double count.
+                    # Let's rely on env.state.steps for the final count in game_result
+
+                # Collect results for this game trial
+                game_result = {
+                    "score": env.state.score,
+                    "steps": env.state.steps, # Use steps from state object
+                    "food": env.state.food_eaten_count,
+                    "collision": env.state.collisions, # True if game ended due to collision
+                    "termination_reason": info.get('termination_reason', 'unknown') # Capture termination reason
+                }
+                game_results.append(game_result)
+
+            # Calculate agent's fitness based on the game results
+            agent_fitness = self.fitness_calculator.calculate_from_game_results(game_results)
             agent.set_fitness(agent_fitness)
 
-        # print("Population evaluation on data finished.") # Optional debug
+        # Close environments after evaluation
+        for env in environments:
+            env.close()
 
 
-    # The _evaluate_population method (for game-based evaluation) is no longer used in the new design
-    # def _evaluate_population(self, initial_stat_features: dict):
-    #    pass # This method is replaced by _evaluate_population_on_data
+    def _calculate_generation_summary(self, generation: int) -> dict:
+        """Calculates summary statistics for the current generation."""
+        agents = self.population.get_agents()
+        fitness_scores = [a.get_fitness() for a in agents if a.get_fitness() is not None]
+
+        summary = {
+            'generation': generation,
+            'best_fitness': float(np.max(fitness_scores)) if fitness_scores else -float('inf'),
+            'average_fitness': float(np.mean(fitness_scores)) if fitness_scores else -float('inf'),
+            'median_fitness': float(np.median(fitness_scores)) if fitness_scores else -float('inf'),
+            'std_fitness': float(np.std(fitness_scores)) if fitness_scores else 0.0,
+            'diversity': float(self.population.calculate_diversity()), # Calculate diversity
+            'timestamp': time.time() # Add timestamp
+        }
+        return summary
+
+    def _check_stagnation(self, generation: int, current_best_fitness: float) -> bool:
+        """Checks if the training has stagnated."""
+        self._best_fitness_history.append(current_best_fitness)
+
+        # Modified the condition to be <= stagnation_generations
+        if len(self._best_fitness_history) <= self.stagnation_generations:
+            # Not enough data yet to check for stagnation over the full period
+            return False
+
+        # Get the best fitness from 'stagnation_generations' ago
+        # This is the fitness at generation (current_generation - stagnation_generations)
+        # In a 0-indexed list, this is at index -(self.stagnation_generations + 1) relative to the end.
+        # Example: if stagnation_generations = 3, current generation history has length 4 (indices 0, 1, 2, 3).
+        # We compare generation 3 (index -1) with generation 0 (index -4).
+        # -(3 + 1) = -4. So index -(self.stagnation_generations + 1) is correct if list length >= stagnation_generations + 1
+        # The condition above ensures list length is at least stagnation_generations + 1.
+        fitness_past = self._best_fitness_history[-(self.stagnation_generations + 1)]
 
 
-    def _save_training_results(self, results_dir: str):
-        """Saves the training history and best genome."""
-        # The results_dir is already created by the executor
-        # os.makedirs(results_dir, exist_ok=True) # No need to recreate here
+        # Check for significant improvement
+        improvement = current_best_fitness - fitness_past
 
-        # Save generation history (summary)
-        summary_path = os.path.join(results_dir, "summary.yaml")
+        # Using an absolute difference threshold for simplicity.
+        # Reset last improvement generation if there's a significant improvement.
+        if improvement > self.stagnation_threshold:
+             self._last_improvement_generation = generation
+             #print(f"DEBUG: Improvement {improvement:.4f} > threshold {self.stagnation_threshold:.4f}. Resetting stagnation at generation {generation}.")
+
+
+        # Stagnation occurs if the last significant improvement was more than stagnation_generations ago
+        # and we have recorded enough generations to check the full period.
+        # This condition means: current_generation - last_improvement_generation >= stagnation_generations
+        is_stagnated = (generation - self._last_improvement_generation) >= self.stagnation_generations
+
+        # Add debug print to see stagnation check logic
+        #print(f"DEBUG: Gen {generation}, Last Impr Gen {self._last_improvement_generation}, Stagnation Gens {self.stagnation_generations}. Is Stagnated: {is_stagnated}")
+
+
+        return is_stagnated
+
+
+    def _save_training_results(self, results_dir: str, training_summary: list):
+        """Saves the training summary and best agent's genome."""
+        # Ensure results directory exists
+        os.makedirs(results_dir, exist_ok=True)
+
+        # Save training summary
+        summary_path = os.path.join(results_dir, "training_summary.json")
         try:
+            # Ensure numpy floats are converted to standard Python floats for JSON
+            summary_serializable = [{k: float(v) if isinstance(v, np.floating) else (int(v) if isinstance(v, np.integer) else v) for k, v in summary_entry.items()} for summary_entry in training_summary] # Changed s to summary_entry for clarity
             with open(summary_path, 'w') as f:
-                # Ensure history data is serializable (e.g., convert numpy arrays in best_genome to lists)
-                serializable_history = []
-                for entry in self.generation_history:
-                    serializable_entry = entry.copy()
-                    if isinstance(serializable_entry.get('best_genome'), np.ndarray):
-                        serializable_entry['best_genome'] = serializable_entry['best_genome'].tolist()
-                    serializable_history.append(serializable_entry)
-
-                yaml.dump(serializable_history, f, indent=4)
+                json.dump(summary_serializable, f, indent=4)
             print(f"Training summary saved to {summary_path}")
-        except ImportError:
-            print("Warning: PyYAML not installed. Cannot save training summary.")
         except IOError as e:
-            print(f"Error saving training summary to {summary_path}: {e}")
+             print(f"Error saving training summary to {summary_path}: {e}")
         except Exception as e:
              print(f"An unexpected error occurred saving training summary: {e}")
 
@@ -315,7 +306,6 @@ class GeneticTrainer:
                 json.dump(last_gen_scores, f, indent=4)
             print(f"Last generation scores saved to {scores_path}")
         except IOError as e:
-             print(f"Error saving scores to {scores_path}: {e}")
+             print(f"Error saving last generation scores to {scores_path}: {e}")
         except Exception as e:
-             print(f"An unexpected error occurred saving scores: {e}")
-
+             print(f"An unexpected error occurred saving last generation scores: {e}")
